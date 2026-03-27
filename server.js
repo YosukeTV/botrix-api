@@ -1,166 +1,225 @@
 const express = require('express');
 const cors = require('cors');
-const { MongoClient, ServerApiVersion } = require('mongodb');
+const { MongoClient } = require('mongodb');
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// ============================================================
+// BOTRIX.LIVE CONFIGURATION
+// ============================================================
+const BOTRIX_API_BASE = "https://botrix.live/api";
+const BOTRIX_BID = process.env.BOTRIX_BID; // Your BotRix secret ID (bid)
+const BOTRIX_PLATFORM = "kick"; // or "twitch" depending on your platform
 
 // CORS configuration
 const allowedOrigins = [
     'https://yosuketv.github.io',
     'https://YosukeTV.github.io',
     'http://localhost:3000',
-    'http://localhost:5500',
-    'http://127.0.0.1:5500'
+    'http://localhost:5500'
 ];
 
-const corsOptions = {
+app.use(cors({
     origin: function (origin, callback) {
         if (!origin) return callback(null, true);
         if (allowedOrigins.indexOf(origin) !== -1) {
             callback(null, true);
         } else {
-            console.log('⚠️ Blocked origin:', origin);
             callback(null, true);
         }
     },
-    credentials: true,
-    optionsSuccessStatus: 200,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
-};
-
-app.use(cors(corsOptions));
+    credentials: true
+}));
 app.use(express.json());
 
-app.use((req, res, next) => {
-    console.log(`📡 ${req.method} ${req.path} - Origin: ${req.headers.origin || 'no origin'}`);
-    next();
-});
-
-app.options('*', cors(corsOptions));
-
-// Database connection with SSL fixes
+// Database connection (for storing pool entries)
 const MONGODB_URI = process.env.MONGODB_URI;
 let db;
 let client;
 
 async function connectDB() {
     try {
-        if (!MONGODB_URI) {
-            throw new Error('MONGODB_URI environment variable is not set');
-        }
-        
-        console.log('🔄 Connecting to MongoDB Atlas...');
-        
         client = new MongoClient(MONGODB_URI, {
-            serverApi: {
-                version: ServerApiVersion.v1,
-                strict: true,
-                deprecationErrors: true,
-            },
-            tls: true,
-            tlsAllowInvalidCertificates: false,
+            useNewUrlParser: true,
+            useUnifiedTopology: true,
             connectTimeoutMS: 30000,
-            socketTimeoutMS: 30000,
-            serverSelectionTimeoutMS: 30000,
-            retryWrites: true,
-            retryReads: true
+            serverSelectionTimeoutMS: 30000
         });
         
         await client.connect();
         db = client.db('botrix');
+        console.log('✅ Connected to MongoDB');
         
-        // Test connection
-        await db.command({ ping: 1 });
-        console.log('✅ Connected to MongoDB Atlas');
-        
-        // Create collections if they don't exist
         const collections = await db.listCollections().toArray();
         const collectionNames = collections.map(c => c.name);
         
-        if (!collectionNames.includes('users')) {
-            await db.createCollection('users');
-            console.log('✅ Created "users" collection');
-        }
-        
         if (!collectionNames.includes('pool_entries')) {
             await db.createCollection('pool_entries');
-            console.log('✅ Created "pool_entries" collection');
+            console.log('✅ Created pool_entries collection');
         }
         
         console.log('✅ Database ready');
         
     } catch (error) {
         console.error('❌ Database connection error:', error);
-        console.error('Connection string (hidden):', MONGODB_URI.replace(/\/\/[^:]+:[^@]+@/, '//****:****@'));
         throw error;
     }
 }
 
-// Health check endpoint
+// ============================================================
+// BOTRIX.LIVE API INTEGRATION
+// ============================================================
+
+/**
+ * Get user points from BotRix leaderboard
+ * Using: GET /api/public/leaderboard?platform=kick&user={streamer}&search={viewerName}
+ */
+async function getBotRixPoints(streamerName, viewerName) {
+    try {
+        const url = `${BOTRIX_API_BASE}/public/leaderboard?platform=${BOTRIX_PLATFORM}&user=${encodeURIComponent(streamerName)}&search=${encodeURIComponent(viewerName)}`;
+        console.log(`Fetching points from: ${url}`);
+        
+        const response = await fetch(url);
+        
+        if (!response.ok) {
+            throw new Error(`BotRix API error: ${response.status}`);
+        }
+        
+        const data = await response.json();
+        
+        // Parse the response to find the user's points
+        // The leaderboard returns an array of users with points
+        if (data && Array.isArray(data) && data.length > 0) {
+            // Find the matching user
+            const user = data.find(u => u.name?.toLowerCase() === viewerName.toLowerCase());
+            if (user) {
+                return { success: true, points: user.points || 0 };
+            }
+        }
+        
+        // User not found on leaderboard (0 points)
+        return { success: true, points: 0 };
+        
+    } catch (error) {
+        console.error('Error fetching BotRix points:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Spend points via BotRix API
+ * Using: GET /api/extension/substractPoints?uid={userId}&platform=kick&points={amount}&bid={secret}
+ */
+async function spendBotRixPoints(userId, amount, reason) {
+    try {
+        const url = `${BOTRIX_API_BASE}/extension/substractPoints?uid=${encodeURIComponent(userId)}&platform=${BOTRIX_PLATFORM}&points=${amount}&bid=${BOTRIX_BID}`;
+        console.log(`Spending points via: ${url}`);
+        
+        const response = await fetch(url);
+        
+        if (!response.ok) {
+            throw new Error(`BotRix API error: ${response.status}`);
+        }
+        
+        const data = await response.json();
+        
+        return { 
+            success: data.success === true, 
+            message: data.success ? `Successfully spent ${amount} points` : 'Failed to spend points'
+        };
+        
+    } catch (error) {
+        console.error('Error spending BotRix points:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Refund points (add back) - use negative amount
+ */
+async function refundBotRixPoints(userId, amount, reason) {
+    try {
+        const url = `${BOTRIX_API_BASE}/extension/substractPoints?uid=${encodeURIComponent(userId)}&platform=${BOTRIX_PLATFORM}&points=${-amount}&bid=${BOTRIX_BID}`;
+        
+        const response = await fetch(url);
+        const data = await response.json();
+        
+        return { success: data.success === true };
+        
+    } catch (error) {
+        console.error('Error refunding BotRix points:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Get user level from BotRix
+ * Using: GET /api/extension/userLevel?uid={uid}&platform=kick&level={level}&bid={secret}
+ */
+async function getUserLevel(userId) {
+    try {
+        const url = `${BOTRIX_API_BASE}/extension/userLevel?uid=${encodeURIComponent(userId)}&platform=${BOTRIX_PLATFORM}&level=0&bid=${BOTRIX_BID}`;
+        
+        const response = await fetch(url);
+        const data = await response.json();
+        
+        return { success: true, level: data.level || 0 };
+        
+    } catch (error) {
+        console.error('Error fetching user level:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// ============================================================
+// API ENDPOINTS FOR YOUR FRONTEND
+// ============================================================
+
+// Health check
 app.get('/', (req, res) => {
     res.json({ 
         status: 'BotRix API is running!',
-        timestamp: new Date().toISOString(),
+        botrix: 'Connected',
         mongodb: db ? 'connected' : 'disconnected',
-        endpoints: [
-            'GET  /api/points/:twitchId',
-            'POST /api/join-pool',
-            'GET  /api/entries/:twitchId',
-            'GET  /'
-        ]
+        platform: BOTRIX_PLATFORM
     });
 });
 
-// API Endpoints (same as before)
-app.get('/api/points/:twitchId', async (req, res) => {
+// Get user's BotRix points
+app.get('/api/points/:streamer/:viewer', async (req, res) => {
     try {
-        const { twitchId } = req.params;
+        const { streamer, viewer } = req.params;
         
-        if (!twitchId) {
-            return res.status(400).json({ success: false, error: 'twitchId is required' });
-        }
+        const result = await getBotRixPoints(streamer, viewer);
         
-        let user = await db.collection('users').findOne({ twitchId });
-        
-        if (!user) {
-            user = {
-                twitchId,
-                points: 1250,
-                createdAt: new Date(),
-                lastActive: new Date()
-            };
-            await db.collection('users').insertOne(user);
-            console.log(`✅ Created new user ${twitchId} with 1250 points`);
+        if (result.success) {
+            res.json({ success: true, points: result.points });
         } else {
-            await db.collection('users').updateOne(
-                { twitchId },
-                { $set: { lastActive: new Date() } }
-            );
+            res.status(500).json({ success: false, error: result.error });
         }
-        
-        res.json({ success: true, points: user.points });
     } catch (error) {
         console.error('Error in /api/points:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
+// Spend points to join a pool
 app.post('/api/join-pool', async (req, res) => {
     try {
-        const { twitchId, poolId, poolName, cost } = req.body;
+        const { userId, streamerName, viewerName, poolId, poolName, cost } = req.body;
         
-        if (!twitchId || !poolId || !poolName || !cost) {
+        if (!userId || !streamerName || !viewerName || !poolId || !poolName || !cost) {
             return res.status(400).json({ 
                 success: false, 
                 message: 'Missing required fields' 
             });
         }
         
+        // Check if user already entered this pool
         const existingEntry = await db.collection('pool_entries').findOne({
-            twitchId,
+            userId,
             poolId
         });
         
@@ -171,30 +230,38 @@ app.post('/api/join-pool', async (req, res) => {
             });
         }
         
-        const user = await db.collection('users').findOne({ twitchId });
+        // Get current points from BotRix to verify
+        const pointsResult = await getBotRixPoints(streamerName, viewerName);
         
-        if (!user) {
+        if (!pointsResult.success) {
             return res.json({ 
                 success: false, 
-                message: 'User not found' 
+                message: 'Could not verify your points balance' 
             });
         }
         
-        if (user.points < cost) {
+        if (pointsResult.points < cost) {
             return res.json({ 
                 success: false, 
-                message: `Insufficient points! Need ${cost}, you have ${user.points}` 
+                message: `Insufficient BotRix points! You have ${pointsResult.points}, need ${cost}.` 
             });
         }
         
-        const newPoints = user.points - cost;
-        await db.collection('users').updateOne(
-            { twitchId },
-            { $set: { points: newPoints, lastActive: new Date() } }
-        );
+        // Spend points via BotRix API
+        const spendResult = await spendBotRixPoints(userId, cost, `Joined pool: ${poolName}`);
         
+        if (!spendResult.success) {
+            return res.json({ 
+                success: false, 
+                message: `Failed to spend points: ${spendResult.error || 'Unknown error'}` 
+            });
+        }
+        
+        // Record the pool entry
         await db.collection('pool_entries').insertOne({
-            twitchId,
+            userId,
+            viewerName,
+            streamerName,
             poolId,
             poolName,
             cost,
@@ -203,8 +270,8 @@ app.post('/api/join-pool', async (req, res) => {
         
         res.json({ 
             success: true, 
-            message: `Successfully joined ${poolName}!`,
-            newPoints
+            message: `Successfully joined ${poolName}! Spent ${cost} BotRix points.`,
+            newPoints: pointsResult.points - cost
         });
         
     } catch (error) {
@@ -213,12 +280,13 @@ app.post('/api/join-pool', async (req, res) => {
     }
 });
 
-app.get('/api/entries/:twitchId', async (req, res) => {
+// Get user's pool entries
+app.get('/api/entries/:userId', async (req, res) => {
     try {
-        const { twitchId } = req.params;
+        const { userId } = req.params;
         
         const entries = await db.collection('pool_entries')
-            .find({ twitchId })
+            .find({ userId })
             .sort({ joinedAt: -1 })
             .toArray();
         
@@ -233,7 +301,8 @@ app.get('/api/entries/:twitchId', async (req, res) => {
 connectDB().then(() => {
     app.listen(PORT, () => {
         console.log(`🚀 BotRix API Server running on port ${PORT}`);
-        console.log(`📍 CORS enabled for: ${allowedOrigins.join(', ')}`);
+        console.log(`📍 Platform: ${BOTRIX_PLATFORM}`);
+        console.log(`📍 BotRix API: ${BOTRIX_API_BASE}`);
     });
 }).catch(err => {
     console.error('Failed to start server:', err);
