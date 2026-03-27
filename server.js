@@ -318,3 +318,20 @@ process.on('SIGINT', async () => {
     }
     process.exit(0);
 });
+// Add this to your server.js
+app.post('/api/add-points', async (req, res) => {
+    try {
+        const { userId, amount, platform, reason } = req.body;
+        
+        // Use BotRix substractPoints with negative amount to add points
+        const url = `${BOTRIX_API_BASE}/extension/substractPoints?uid=${encodeURIComponent(userId)}&platform=${platform}&points=${-amount}&bid=${BOTRIX_BID}`;
+        
+        const response = await fetch(url);
+        const data = await response.json();
+        
+        res.json({ success: data.success === true });
+    } catch (error) {
+        console.error('Error adding points:', error);
+        res.json({ success: false, error: error.message });
+    }
+});
