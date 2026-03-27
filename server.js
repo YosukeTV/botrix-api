@@ -10,7 +10,7 @@ const PORT = process.env.PORT || 3000;
 // BOTRIX.LIVE CONFIGURATION
 // ============================================================
 const BOTRIX_API_BASE = "https://botrix.live/api";
-const BOTRIX_BID = "7J06PwfKOA7Ayg"; // Your BotRix secret ID (bid)
+const BOTRIX_BID = "fgMhJa9/7J06PwfKOA7Ayg"; // Your BotRix secret ID (bid)
 const BOTRIX_PLATFORM = "twitch"; // or "twitch" depending on your platform
 
 // CORS configuration
