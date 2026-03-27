@@ -72,9 +72,14 @@ async function getBotRixUserStats(viewerName) {
     }
 }
 
+// ============================================================
+// BOTRIX PRIVATE API - SPEND / ADD POINTS
+// ============================================================
+
 async function spendBotRixPoints(userId, amount, reason) {
     try {
         const url = `${BOTRIX_API_BASE}/extension/substractPoints?uid=${encodeURIComponent(userId)}&platform=${BOTRIX_PLATFORM}&points=${amount}&bid=${BOTRIX_BID}`;
+        console.log(`Spending ${amount} points for ${userId}`);
         const response = await fetch(url);
         const data = await response.json();
         return { success: data.success === true };
@@ -86,6 +91,7 @@ async function spendBotRixPoints(userId, amount, reason) {
 async function addBotRixPoints(userId, amount, reason) {
     try {
         const url = `${BOTRIX_API_BASE}/extension/substractPoints?uid=${encodeURIComponent(userId)}&platform=${BOTRIX_PLATFORM}&points=${-amount}&bid=${BOTRIX_BID}`;
+        console.log(`Adding ${amount} points to ${userId}`);
         const response = await fetch(url);
         const data = await response.json();
         return { success: data.success === true };
@@ -141,8 +147,8 @@ app.post('/api/place-bet', async (req, res) => {
             });
         }
         
-        // Spend points via BotRix API
-        const spendResult = await spendBotRixPoints(userId, betAmount, `Wheel Bet: ${betAmount} points`);
+        // Spend points via BotRix API (DEDUCT)
+        const spendResult = await spendBotRixPoints(viewerName, betAmount, `Wheel Bet: ${betAmount} points`);
         if (!spendResult.success) {
             return res.json({ success: false, message: 'Failed to deduct points' });
         }
@@ -194,21 +200,80 @@ app.get('/api/pending-bets', async (req, res) => {
     }
 });
 
-// Resolve bet - WIN (award 24x points)
+// Resolve ALL pending bets as WIN (award 24x points to everyone)
+app.post('/api/resolve-all-win', async (req, res) => {
+    try {
+        const pendingBets = await db.collection('bets').find({ status: 'pending' }).toArray();
+        
+        if (pendingBets.length === 0) {
+            return res.json({ success: false, message: 'No pending bets to resolve.' });
+        }
+        
+        let results = [];
+        let successCount = 0;
+        
+        for (const bet of pendingBets) {
+            const winAmount = bet.betAmount * 24;
+            
+            // Add points via BotRix API (using negative points)
+            const addResult = await addBotRixPoints(bet.viewerName, winAmount, `Wheel Bet WIN - ${winAmount} points`);
+            
+            if (addResult.success) {
+                await db.collection('bets').updateOne(
+                    { _id: bet._id },
+                    { $set: { status: 'win', winAmount: winAmount, resolvedAt: new Date() } }
+                );
+                successCount++;
+                results.push({ viewer: bet.viewerName, status: 'win', amount: winAmount });
+            } else {
+                results.push({ viewer: bet.viewerName, status: 'failed', error: 'API error' });
+            }
+        }
+        
+        res.json({ 
+            success: true, 
+            message: `🎉 Processed ${successCount} wins! ${successCount} viewers won their bets!`,
+            results: results
+        });
+        
+    } catch (error) {
+        console.error('Error in resolve-all-win:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Resolve ALL pending bets as LOSS (just mark as loss, points already deducted)
+app.post('/api/resolve-all-loss', async (req, res) => {
+    try {
+        const result = await db.collection('bets').updateMany(
+            { status: 'pending' },
+            { $set: { status: 'loss', resolvedAt: new Date() } }
+        );
+        
+        res.json({ 
+            success: true, 
+            message: `💀 Processed ${result.modifiedCount} losses. Points were already deducted. Better luck next time!`
+        });
+        
+    } catch (error) {
+        console.error('Error in resolve-all-loss:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Resolve individual bet - WIN (kept for backward compatibility)
 app.post('/api/resolve-win', async (req, res) => {
     try {
         const { betId, viewerName, betAmount } = req.body;
         
         const winAmount = betAmount * 24;
         
-        // Add points via BotRix API
         const addResult = await addBotRixPoints(viewerName, winAmount, 'Wheel Bet Win - 24x');
         
         if (!addResult.success) {
             return res.json({ success: false, message: 'Failed to award points' });
         }
         
-        // Mark bet as resolved
         await db.collection('bets').updateOne(
             { _id: new ObjectId(betId) },
             { $set: { status: 'win', winAmount: winAmount, resolvedAt: new Date() } }
@@ -228,7 +293,7 @@ app.post('/api/resolve-win', async (req, res) => {
     }
 });
 
-// Resolve bet - LOSS (points already deducted)
+// Resolve individual bet - LOSS (kept for backward compatibility)
 app.post('/api/resolve-loss', async (req, res) => {
     try {
         const { betId, viewerName } = req.body;
@@ -268,9 +333,32 @@ app.get('/api/bets/:userId', async (req, res) => {
 
 // Health check
 app.get('/', (req, res) => {
-    res.json({ status: 'BotRix API is running!', mongodb: db ? 'connected' : 'disconnected' });
+    res.json({ 
+        status: 'BotRix API is running!', 
+        mongodb: db ? 'connected' : 'disconnected',
+        platform: BOTRIX_PLATFORM,
+        streamer: STREAMER_NAME
+    });
 });
 
+// Start server
 connectDB().then(() => {
-    app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
-}).catch(err => process.exit(1));
+    app.listen(PORT, () => {
+        console.log(`🚀 Server running on port ${PORT}`);
+        console.log(`📍 Platform: ${BOTRIX_PLATFORM}`);
+        console.log(`📍 Streamer: ${STREAMER_NAME}`);
+    });
+}).catch(err => {
+    console.error('Failed to start server:', err);
+    process.exit(1);
+});
+
+// Graceful shutdown
+process.on('SIGINT', async () => {
+    console.log('\n🛑 Shutting down...');
+    if (client) {
+        await client.close();
+        console.log('✅ MongoDB connection closed');
+    }
+    process.exit(0);
+});
