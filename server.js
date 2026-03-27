@@ -22,6 +22,9 @@ const MONGODB_URI = process.env.MONGODB_URI;
 let db;
 let client;
 
+// Cache for user IDs (to avoid repeated API calls)
+let userIdCache = {};
+
 async function connectDB() {
     try {
         client = new MongoClient(MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true });
@@ -41,6 +44,48 @@ async function connectDB() {
     } catch (error) {
         console.error('❌ Database connection error:', error);
         throw error;
+    }
+}
+
+// ============================================================
+// BOTRIX API - GET USER ID (from leaderboard or user endpoint)
+// ============================================================
+
+async function getBotRixUserId(viewerName) {
+    try {
+        // Check cache first
+        if (userIdCache[viewerName.toLowerCase()]) {
+            return { success: true, userId: userIdCache[viewerName.toLowerCase()] };
+        }
+        
+        // Try to get user from leaderboard with search
+        const url = `${BOTRIX_API_BASE}/public/leaderboard?platform=${BOTRIX_PLATFORM}&user=${encodeURIComponent(STREAMER_NAME)}&search=${encodeURIComponent(viewerName)}`;
+        console.log(`Fetching user ID from: ${url}`);
+        
+        const response = await fetch(url);
+        const data = await response.json();
+        
+        if (Array.isArray(data) && data.length > 0) {
+            const userData = data[0];
+            // The API returns user data but doesn't include a numeric ID in the public endpoint
+            // For now, we'll use the username as a fallback, but this may not work for the private API
+            
+            // For private API, we need to try a different approach
+            // Since BotRix private API uses username as uid (based on your earlier message)
+            // Let's try using the username directly as uid
+            
+            console.log(`Found user: ${userData.name}, using username as uid`);
+            userIdCache[viewerName.toLowerCase()] = viewerName;
+            return { success: true, userId: viewerName };
+        }
+        
+        // If not found, return username as fallback
+        console.log(`User ${viewerName} not found, using username as uid`);
+        return { success: true, userId: viewerName };
+        
+    } catch (error) {
+        console.error('Error fetching user ID:', error);
+        return { success: false, error: error.message };
     }
 }
 
@@ -78,24 +123,48 @@ async function getBotRixUserStats(viewerName) {
 
 async function spendBotRixPoints(userId, amount, reason) {
     try {
-        const url = `${BOTRIX_API_BASE}/extension/substractPoints?uid=${encodeURIComponent(userId)}&platform=${BOTRIX_PLATFORM}&points=${amount}&bid=${BOTRIX_BID}`;
-        console.log(`Spending ${amount} points for ${userId}`);
+        // First get the user's numeric ID or use username
+        const userIdResult = await getBotRixUserId(userId);
+        if (!userIdResult.success) {
+            return { success: false, error: 'Could not get user ID' };
+        }
+        
+        const uid = userIdResult.userId;
+        const url = `${BOTRIX_API_BASE}/extension/substractPoints?uid=${encodeURIComponent(uid)}&platform=${BOTRIX_PLATFORM}&points=${amount}&bid=${BOTRIX_BID}`;
+        console.log(`Spending ${amount} points for ${userId} (uid: ${uid})`);
+        console.log(`Full URL: ${url}`);
+        
         const response = await fetch(url);
         const data = await response.json();
+        console.log(`Spend response:`, data);
+        
         return { success: data.success === true };
     } catch (error) {
+        console.error('Error spending points:', error);
         return { success: false, error: error.message };
     }
 }
 
 async function addBotRixPoints(userId, amount, reason) {
     try {
-        const url = `${BOTRIX_API_BASE}/extension/substractPoints?uid=${encodeURIComponent(userId)}&platform=${BOTRIX_PLATFORM}&points=${-amount}&bid=${BOTRIX_BID}`;
-        console.log(`Adding ${amount} points to ${userId}`);
+        // First get the user's numeric ID or use username
+        const userIdResult = await getBotRixUserId(userId);
+        if (!userIdResult.success) {
+            return { success: false, error: 'Could not get user ID' };
+        }
+        
+        const uid = userIdResult.userId;
+        const url = `${BOTRIX_API_BASE}/extension/substractPoints?uid=${encodeURIComponent(uid)}&platform=${BOTRIX_PLATFORM}&points=${-amount}&bid=${BOTRIX_BID}`;
+        console.log(`Adding ${amount} points to ${userId} (uid: ${uid})`);
+        console.log(`Full URL: ${url}`);
+        
         const response = await fetch(url);
         const data = await response.json();
+        console.log(`Add points response:`, data);
+        
         return { success: data.success === true };
     } catch (error) {
+        console.error('Error adding points:', error);
         return { success: false, error: error.message };
     }
 }
@@ -147,10 +216,10 @@ app.post('/api/place-bet', async (req, res) => {
             });
         }
         
-        // Spend points via BotRix API (DEDUCT)
+        // Spend points via BotRix API (DEDUCT) - use viewerName as the uid
         const spendResult = await spendBotRixPoints(viewerName, betAmount, `Wheel Bet: ${betAmount} points`);
         if (!spendResult.success) {
-            return res.json({ success: false, message: 'Failed to deduct points' });
+            return res.json({ success: false, message: 'Failed to deduct points. Please try again.' });
         }
         
         // Record the bet in database
@@ -185,16 +254,7 @@ app.get('/api/pending-bets', async (req, res) => {
             .sort({ createdAt: -1 })
             .toArray();
         
-        // Get current points for each bettor
-        const betsWithPoints = await Promise.all(bets.map(async (bet) => {
-            const stats = await getBotRixUserStats(bet.viewerName);
-            return {
-                ...bet,
-                currentPoints: stats.success ? stats.points : 0
-            };
-        }));
-        
-        res.json({ success: true, bets: betsWithPoints });
+        res.json({ success: true, bets });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
@@ -261,62 +321,6 @@ app.post('/api/resolve-all-loss', async (req, res) => {
     }
 });
 
-// Resolve individual bet - WIN (kept for backward compatibility)
-app.post('/api/resolve-win', async (req, res) => {
-    try {
-        const { betId, viewerName, betAmount } = req.body;
-        
-        const winAmount = betAmount * 24;
-        
-        const addResult = await addBotRixPoints(viewerName, winAmount, 'Wheel Bet Win - 24x');
-        
-        if (!addResult.success) {
-            return res.json({ success: false, message: 'Failed to award points' });
-        }
-        
-        await db.collection('bets').updateOne(
-            { _id: new ObjectId(betId) },
-            { $set: { status: 'win', winAmount: winAmount, resolvedAt: new Date() } }
-        );
-        
-        const newStats = await getBotRixUserStats(viewerName);
-        
-        res.json({ 
-            success: true, 
-            message: `WIN! ${viewerName} won ${winAmount} points! (${betAmount} × 24)`,
-            newPoints: newStats.success ? newStats.points : null
-        });
-        
-    } catch (error) {
-        console.error('Error resolving win:', error);
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-// Resolve individual bet - LOSS (kept for backward compatibility)
-app.post('/api/resolve-loss', async (req, res) => {
-    try {
-        const { betId, viewerName } = req.body;
-        
-        await db.collection('bets').updateOne(
-            { _id: new ObjectId(betId) },
-            { $set: { status: 'loss', resolvedAt: new Date() } }
-        );
-        
-        const newStats = await getBotRixUserStats(viewerName);
-        
-        res.json({ 
-            success: true, 
-            message: `LOSS confirmed for ${viewerName}. Points already deducted.`,
-            newPoints: newStats.success ? newStats.points : null
-        });
-        
-    } catch (error) {
-        console.error('Error resolving loss:', error);
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
 // Get user's bet history
 app.get('/api/bets/:userId', async (req, res) => {
     try {
@@ -347,6 +351,7 @@ connectDB().then(() => {
         console.log(`🚀 Server running on port ${PORT}`);
         console.log(`📍 Platform: ${BOTRIX_PLATFORM}`);
         console.log(`📍 Streamer: ${STREAMER_NAME}`);
+        console.log(`📍 BotRix BID: ${BOTRIX_BID.substring(0, 10)}...`);
     });
 }).catch(err => {
     console.error('Failed to start server:', err);
