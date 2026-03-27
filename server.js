@@ -45,19 +45,27 @@ async function connectDB() {
 }
 
 // ============================================================
-// BOTRIX PUBLIC API - GET USER STATS (by username)
+// BOTRIX PUBLIC API - GET USER STATS (NO CACHING)
 // ============================================================
 
 async function getBotRixUserStatsByUsername(viewerName) {
     try {
-        const url = `${BOTRIX_API_BASE}/public/leaderboard?platform=${BOTRIX_PLATFORM}&user=${encodeURIComponent(STREAMER_NAME)}&search=${encodeURIComponent(viewerName)}`;
-        console.log(`Fetching stats from: ${url}`);
+        // Add timestamp to prevent any caching
+        const url = `${BOTRIX_API_BASE}/public/leaderboard?platform=${BOTRIX_PLATFORM}&user=${encodeURIComponent(STREAMER_NAME)}&search=${encodeURIComponent(viewerName)}&_=${Date.now()}`;
+        console.log(`🔄 Fetching fresh stats from: ${url}`);
         
-        const response = await fetch(url);
+        const response = await fetch(url, {
+            cache: 'no-store',
+            headers: {
+                'Cache-Control': 'no-cache, no-store, must-revalidate',
+                'Pragma': 'no-cache'
+            }
+        });
         const data = await response.json();
         
         if (Array.isArray(data) && data.length > 0) {
             const userData = data[0];
+            console.log(`✅ Found ${viewerName}: ${userData.points} points`);
             return { 
                 success: true, 
                 points: userData.points || 0,
@@ -68,19 +76,21 @@ async function getBotRixUserStatsByUsername(viewerName) {
                 followage: userData.followage || 0
             };
         }
+        console.log(`⚠️ User ${viewerName} not found, returning 0 points`);
         return { success: true, points: 0, level: 0, watchtime: 0, xp: 0, name: viewerName, followage: 0 };
     } catch (error) {
+        console.error('Error fetching user stats:', error);
         return { success: false, error: error.message };
     }
 }
 
 // ============================================================
-// BOTRIX PRIVATE API - USING NUMERIC TWITCH ID
+// BOTRIX PRIVATE API - SPEND / ADD POINTS
 // ============================================================
 
 async function spendBotRixPoints(twitchUserId, amount, reason) {
     try {
-        const url = `${BOTRIX_API_BASE}/extension/substractPoints?uid=${encodeURIComponent(twitchUserId)}&platform=${BOTRIX_PLATFORM}&points=${amount}&bid=${BOTRIX_BID}`;
+        const url = `${BOTRIX_API_BASE}/extension/substractPoints?uid=${encodeURIComponent(twitchUserId)}&platform=${BOTRIX_PLATFORM}&points=${amount}&bid=${BOTRIX_BID}&_=${Date.now()}`;
         console.log(`🔴 Spending ${amount} points for user ID: ${twitchUserId}`);
         
         const response = await fetch(url);
@@ -96,7 +106,7 @@ async function spendBotRixPoints(twitchUserId, amount, reason) {
 
 async function addBotRixPoints(twitchUserId, amount, reason) {
     try {
-        const url = `${BOTRIX_API_BASE}/extension/substractPoints?uid=${encodeURIComponent(twitchUserId)}&platform=${BOTRIX_PLATFORM}&points=${-amount}&bid=${BOTRIX_BID}`;
+        const url = `${BOTRIX_API_BASE}/extension/substractPoints?uid=${encodeURIComponent(twitchUserId)}&platform=${BOTRIX_PLATFORM}&points=${-amount}&bid=${BOTRIX_BID}&_=${Date.now()}`;
         console.log(`🟢 Adding ${amount} points to user ID: ${twitchUserId}`);
         
         const response = await fetch(url);
@@ -114,13 +124,20 @@ async function addBotRixPoints(twitchUserId, amount, reason) {
 // API ENDPOINTS
 // ============================================================
 
-// Get user points and stats (by username for display)
+// Get user points and stats - ALWAYS FRESH
 app.get('/api/user/:viewer', async (req, res) => {
     try {
         const { viewer } = req.params;
+        console.log(`📡 API call for user: ${viewer}`);
         const result = await getBotRixUserStatsByUsername(viewer);
         if (result.success) {
-            res.json({ success: true, points: result.points, stats: result });
+            // Add timestamp to response to show it's fresh
+            res.json({ 
+                success: true, 
+                points: result.points, 
+                stats: result,
+                timestamp: Date.now()
+            });
         } else {
             res.status(500).json({ success: false, error: result.error });
         }
@@ -129,7 +146,7 @@ app.get('/api/user/:viewer', async (req, res) => {
     }
 });
 
-// Place a bet (deduct points immediately) - USING NUMERIC TWITCH ID
+// Place a bet (deduct points immediately)
 app.post('/api/place-bet', async (req, res) => {
     try {
         const { userId, viewerName, betAmount, twitchId } = req.body;
@@ -173,10 +190,13 @@ app.post('/api/place-bet', async (req, res) => {
         
         const result = await db.collection('bets').insertOne(betEntry);
         
+        // Get fresh points after deduction
+        const freshStats = await getBotRixUserStatsByUsername(viewerName);
+        
         res.json({ 
             success: true, 
             message: `Bet placed! ${betAmount} points deducted. Waiting for result.`,
-            newPoints: userStats.points - betAmount,
+            newPoints: freshStats.success ? freshStats.points : userStats.points - betAmount,
             betId: result.insertedId
         });
         
@@ -194,13 +214,22 @@ app.get('/api/pending-bets', async (req, res) => {
             .sort({ createdAt: -1 })
             .toArray();
         
-        res.json({ success: true, bets });
+        // Get current points for each bettor (fresh)
+        const betsWithPoints = await Promise.all(bets.map(async (bet) => {
+            const stats = await getBotRixUserStatsByUsername(bet.viewerName);
+            return {
+                ...bet,
+                currentPoints: stats.success ? stats.points : 0
+            };
+        }));
+        
+        res.json({ success: true, bets: betsWithPoints });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
-// Resolve ALL pending bets as WIN (award 24x points to everyone)
+// Resolve ALL pending bets as WIN
 app.post('/api/resolve-all-win', async (req, res) => {
     try {
         const pendingBets = await db.collection('bets').find({ status: 'pending' }).toArray();
@@ -231,8 +260,9 @@ app.post('/api/resolve-all-win', async (req, res) => {
         
         res.json({ 
             success: true, 
-            message: `🎉 Processed ${successCount} wins! ${successCount} viewers won their bets!`,
-            results: results
+            message: `🎉 Processed ${successCount} wins!`,
+            results: results,
+            timestamp: Date.now()
         });
         
     } catch (error) {
@@ -251,7 +281,8 @@ app.post('/api/resolve-all-loss', async (req, res) => {
         
         res.json({ 
             success: true, 
-            message: `💀 Processed ${result.modifiedCount} losses. Points were already deducted. Better luck next time!`
+            message: `💀 Processed ${result.modifiedCount} losses.`,
+            timestamp: Date.now()
         });
         
     } catch (error) {
@@ -274,19 +305,12 @@ app.get('/api/bets/:userId', async (req, res) => {
     }
 });
 
-// Debug endpoint to test spending with numeric ID
-app.get('/api/debug/test-spend/:twitchId/:points', async (req, res) => {
+// Debug endpoint to test fresh fetch
+app.get('/api/debug/fresh/:username', async (req, res) => {
     try {
-        const { twitchId, points } = req.params;
-        const result = await spendBotRixPoints(twitchId, parseInt(points), 'Debug test');
-        const testUrl = `${BOTRIX_API_BASE}/extension/substractPoints?uid=${twitchId}&platform=${BOTRIX_PLATFORM}&points=${points}&bid=${BOTRIX_BID}`;
-        
-        res.json({ 
-            testUrl: testUrl,
-            twitchId: twitchId,
-            points: points,
-            result: result
-        });
+        const { username } = req.params;
+        const result = await getBotRixUserStatsByUsername(username);
+        res.json(result);
     } catch (error) {
         res.json({ error: error.message });
     }
@@ -308,6 +332,7 @@ connectDB().then(() => {
         console.log(`🚀 Server running on port ${PORT}`);
         console.log(`📍 Platform: ${BOTRIX_PLATFORM}`);
         console.log(`📍 Streamer: ${STREAMER_NAME}`);
+        console.log(`📍 No caching enabled - always fetching fresh data`);
     });
 }).catch(err => {
     console.error('Failed to start server:', err);
