@@ -14,8 +14,12 @@ const PORT = process.env.PORT || 3000;
 const BOTRIX_API_BASE = "https://botrix.live/api";
 const BOTRIX_BID = "fgMhJa9%2F7J06PwfKOA7Ayg";
 const STREAMER_NAME = "YosukeTV";
-const ADMIN_SECRET = "#bhOpp!n5791!$;";          // Change this to your own secret
-const JWT_SECRET = process.env.JWT_SECRET || "lmao-jwt-key-bhOpp!n5791!$;-this-to-something-lmao";
+const ADMIN_SECRET = "YosukeAdmin2024";               // only used to grant admin to the streamer
+const JWT_SECRET = process.env.JWT_SECRET || "your-super-secret-jwt-key-change-this";
+
+// 🔑 YOUR TWITCH NUMERIC ID – REPLACE WITH YOUR ACTUAL ID
+// You can find it by logging in with Twitch and looking at the console output.
+const STREAMER_TWITCH_ID = "1466503227";               // <-- CHANGE THIS TO YOUR TWITCH NUMERIC ID
 
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
@@ -40,7 +44,7 @@ async function connectDB() {
         if (!collectionNames.includes('admins')) await db.createCollection('admins');
         
         console.log('✅ Database ready');
-        console.log(`🔐 Admin secret configured`);
+        console.log(`👑 Streamer Twitch ID: ${STREAMER_TWITCH_ID}`);
     } catch (error) {
         console.error('❌ Database connection error:', error);
         throw error;
@@ -48,40 +52,25 @@ async function connectDB() {
 }
 
 // ============================================================
-// HELPER FUNCTIONS
+// HELPER FUNCTIONS – ADMIN CHECK BY TWITCH ID ONLY
 // ============================================================
-async function isUserAdmin(username, twitchId = null) {
-    const adminRecord = await db.collection('admins').findOne({ 
-        $or: [
-            { username: username?.toLowerCase() },
-            { twitchId: twitchId }
-        ]
-    });
-    return !!adminRecord;
+function isUserAdminByTwitchId(twitchId) {
+    return twitchId === STREAMER_TWITCH_ID;
 }
 
-async function setUserAdmin(username, twitchId = null) {
+async function setUserAdmin(username, twitchId) {
+    // Only allow the streamer to become admin
+    if (twitchId !== STREAMER_TWITCH_ID) return false;
     await db.collection('admins').updateOne(
-        { 
-            $or: [
-                { username: username?.toLowerCase() },
-                { twitchId: twitchId }
-            ]
-        },
-        { 
-            $set: { 
-                username: username?.toLowerCase(),
-                twitchId: twitchId,
-                isAdmin: true,
-                grantedAt: new Date()
-            }
-        },
+        { twitchId: STREAMER_TWITCH_ID },
+        { $set: { twitchId: STREAMER_TWITCH_ID, username: username?.toLowerCase(), isAdmin: true, grantedAt: new Date() } },
         { upsert: true }
     );
+    return true;
 }
 
 // ============================================================
-// BOTRIX API
+// BOTRIX API (unchanged)
 // ============================================================
 async function getBotRixUserStatsByUsername(viewerName, platform) {
     try {
@@ -138,8 +127,8 @@ app.post('/api/auth/register', async (req, res) => {
         const hashedPassword = await bcrypt.hash(password, 10);
         const newUser = { username: username.toLowerCase(), displayName: username, email: email || '', password: hashedPassword, createdAt: new Date(), type: 'custom' };
         const result = await db.collection('users').insertOne(newUser);
-        // New users are never admin
         const token = jwt.sign({ userId: result.insertedId, username: username.toLowerCase(), type: 'custom' }, JWT_SECRET, { expiresIn: '7d' });
+        // Custom accounts are never admin
         res.json({ success: true, token, user: { id: result.insertedId, username: username.toLowerCase(), displayName: username, type: 'custom', isAdmin: false } });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
@@ -154,9 +143,9 @@ app.post('/api/auth/login', async (req, res) => {
         if (!user) return res.status(401).json({ success: false, message: 'Invalid username or password' });
         const validPassword = await bcrypt.compare(password, user.password);
         if (!validPassword) return res.status(401).json({ success: false, message: 'Invalid username or password' });
-        const isAdmin = await isUserAdmin(user.username);
+        // Custom accounts are never admin
         const token = jwt.sign({ userId: user._id, username: user.username, type: 'custom' }, JWT_SECRET, { expiresIn: '7d' });
-        res.json({ success: true, token, user: { id: user._id, username: user.username, displayName: user.displayName || user.username, type: 'custom', isAdmin } });
+        res.json({ success: true, token, user: { id: user._id, username: user.username, displayName: user.displayName || user.username, type: 'custom', isAdmin: false } });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
@@ -170,10 +159,9 @@ app.post('/api/auth/verify', async (req, res) => {
         if (decoded.type === 'custom') {
             const user = await db.collection('users').findOne({ username: decoded.username });
             if (!user) return res.status(401).json({ success: false, message: 'User not found', clearToken: true });
-            const isAdmin = await isUserAdmin(user.username);
-            res.json({ success: true, user: { id: user._id, username: user.username, displayName: user.displayName || user.username, type: 'custom', isAdmin } });
+            res.json({ success: true, user: { id: user._id, username: user.username, displayName: user.displayName || user.username, type: 'custom', isAdmin: false } });
         } else if (decoded.type === 'twitch') {
-            const isAdmin = await isUserAdmin(decoded.username, decoded.twitchId);
+            const isAdmin = isUserAdminByTwitchId(decoded.twitchId);
             res.json({ success: true, user: { id: decoded.twitchId, username: decoded.username, displayName: decoded.displayName, type: 'twitch', twitchId: decoded.twitchId, isAdmin } });
         } else {
             res.status(401).json({ success: false, message: 'Invalid token type', clearToken: true });
@@ -184,15 +172,17 @@ app.post('/api/auth/verify', async (req, res) => {
     }
 });
 
+// Admin secret – only works for the streamer's Twitch account
 app.post('/api/auth/admin-verify', async (req, res) => {
     try {
         const { secretCode, username, twitchId, userType } = req.body;
-        if (secretCode === ADMIN_SECRET) {
+        // Only the streamer's Twitch account can become admin
+        if (secretCode === ADMIN_SECRET && userType === 'twitch' && twitchId === STREAMER_TWITCH_ID) {
             await setUserAdmin(username, twitchId);
-            console.log(`✅ Admin granted to: ${username}`);
+            console.log(`✅ Admin granted to streamer (${username}, ${twitchId})`);
             return res.json({ success: true, isAdmin: true, message: 'Admin privileges granted!' });
         }
-        res.json({ success: false, isAdmin: false, message: 'Invalid admin code' });
+        res.json({ success: false, isAdmin: false, message: 'Invalid admin code or not the streamer' });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
@@ -201,7 +191,8 @@ app.post('/api/auth/admin-verify', async (req, res) => {
 app.post('/api/auth/check-admin', async (req, res) => {
     try {
         const { username, twitchId } = req.body;
-        const isAdmin = await isUserAdmin(username, twitchId);
+        // Admin only if Twitch ID matches the streamer's ID
+        const isAdmin = (twitchId === STREAMER_TWITCH_ID);
         res.json({ success: true, isAdmin });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
@@ -209,7 +200,7 @@ app.post('/api/auth/check-admin', async (req, res) => {
 });
 
 // ============================================================
-// BETTING ENDPOINTS
+// BETTING ENDPOINTS (unchanged)
 // ============================================================
 app.get('/api/user/:viewer', async (req, res) => {
     try {
