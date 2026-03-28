@@ -14,8 +14,8 @@ const PORT = process.env.PORT || 3000;
 const BOTRIX_API_BASE = "https://botrix.live/api";
 const BOTRIX_BID = "fgMhJa9%2F7J06PwfKOA7Ayg";
 const STREAMER_NAME = "YosukeTV";
-const ADMIN_SECRET = "YosukeAdmin2024";               // only used to grant admin to the streamer
-const JWT_SECRET = process.env.JWT_SECRET || "your-super-secret-jwt-key-change-this";
+const ADMIN_SECRET = "#bhOpp!n5791!$;";               // only used to grant admin to the streamer
+const JWT_SECRET = process.env.JWT_SECRET || "lmao-jwt-key-bhOpp!n5791!$;-this-to-something-lmao";
 
 // 🔑 YOUR TWITCH NUMERIC ID – REPLACE WITH YOUR ACTUAL ID
 // You can find it by logging in with Twitch and looking at the console output.
