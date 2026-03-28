@@ -1,17 +1,25 @@
 const express = require('express');
 const cors = require('cors');
 const { MongoClient, ObjectId } = require('mongodb');
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
+const { OAuth2Client } = require('google-auth-library');
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ============================================================
-// BOTRIX.LIVE CONFIGURATION
+// CONFIGURATION
 // ============================================================
 const BOTRIX_API_BASE = "https://botrix.live/api";
 const BOTRIX_BID = "fgMhJa9%2F7J06PwfKOA7Ayg";
 const STREAMER_NAME = "YosukeTV";
+const JWT_SECRET = process.env.JWT_SECRET || "your-secret-key-change-this";
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
+
+// Google OAuth Client
+const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
@@ -31,6 +39,11 @@ async function connectDB() {
         const collections = await db.listCollections().toArray();
         const collectionNames = collections.map(c => c.name);
         
+        if (!collectionNames.includes('users')) {
+            await db.createCollection('users');
+            console.log('✅ Created users collection');
+        }
+        
         if (!collectionNames.includes('bets')) {
             await db.createCollection('bets');
             console.log('✅ Created bets collection');
@@ -44,12 +57,11 @@ async function connectDB() {
 }
 
 // ============================================================
-// BOTRIX PUBLIC API - GET USER STATS (with platform parameter)
+// BOTRIX PUBLIC API - GET USER STATS
 // ============================================================
 
 async function getBotRixUserStatsByUsername(viewerName, platform) {
     try {
-        // Use the platform parameter from the request
         const platformValue = platform || 'twitch';
         const url = `${BOTRIX_API_BASE}/public/leaderboard?platform=${platformValue}&user=${encodeURIComponent(STREAMER_NAME)}&search=${encodeURIComponent(viewerName)}&_=${Date.now()}`;
         console.log(`🔄 Fetching fresh stats from: ${url}`);
@@ -86,14 +98,14 @@ async function getBotRixUserStatsByUsername(viewerName, platform) {
 }
 
 // ============================================================
-// BOTRIX PRIVATE API - SPEND / ADD POINTS (works for both platforms)
+// BOTRIX PRIVATE API - SPEND / ADD POINTS
 // ============================================================
 
-async function spendBotRixPoints(twitchUserId, amount, platform, reason) {
+async function spendBotRixPoints(userId, amount, platform, reason) {
     try {
         const platformValue = platform || 'twitch';
-        const url = `${BOTRIX_API_BASE}/extension/substractPoints?uid=${encodeURIComponent(twitchUserId)}&platform=${platformValue}&points=${amount}&bid=${BOTRIX_BID}&_=${Date.now()}`;
-        console.log(`🔴 Spending ${amount} points for user ID: ${twitchUserId} on ${platformValue}`);
+        const url = `${BOTRIX_API_BASE}/extension/substractPoints?uid=${encodeURIComponent(userId)}&platform=${platformValue}&points=${amount}&bid=${BOTRIX_BID}&_=${Date.now()}`;
+        console.log(`🔴 Spending ${amount} points for user ID: ${userId} on ${platformValue}`);
         
         const response = await fetch(url);
         const data = await response.json();
@@ -106,11 +118,11 @@ async function spendBotRixPoints(twitchUserId, amount, platform, reason) {
     }
 }
 
-async function addBotRixPoints(twitchUserId, amount, platform, reason) {
+async function addBotRixPoints(userId, amount, platform, reason) {
     try {
         const platformValue = platform || 'twitch';
-        const url = `${BOTRIX_API_BASE}/extension/substractPoints?uid=${encodeURIComponent(twitchUserId)}&platform=${platformValue}&points=${-amount}&bid=${BOTRIX_BID}&_=${Date.now()}`;
-        console.log(`🟢 Adding ${amount} points to user ID: ${twitchUserId} on ${platformValue}`);
+        const url = `${BOTRIX_API_BASE}/extension/substractPoints?uid=${encodeURIComponent(userId)}&platform=${platformValue}&points=${-amount}&bid=${BOTRIX_BID}&_=${Date.now()}`;
+        console.log(`🟢 Adding ${amount} points to user ID: ${userId} on ${platformValue}`);
         
         const response = await fetch(url);
         const data = await response.json();
@@ -124,15 +136,213 @@ async function addBotRixPoints(twitchUserId, amount, platform, reason) {
 }
 
 // ============================================================
-// API ENDPOINTS
+// USER AUTHENTICATION
 // ============================================================
 
-// Get user points and stats - with platform parameter
+// Register new user
+app.post('/api/auth/register', async (req, res) => {
+    try {
+        const { username, email, password } = req.body;
+        
+        if (!username || !email || !password) {
+            return res.status(400).json({ success: false, message: 'All fields are required' });
+        }
+        
+        // Check if user exists
+        const existingUser = await db.collection('users').findOne({ 
+            $or: [{ email: email.toLowerCase() }, { username: username.toLowerCase() }]
+        });
+        
+        if (existingUser) {
+            return res.status(400).json({ success: false, message: 'Username or email already exists' });
+        }
+        
+        // Hash password
+        const hashedPassword = await bcrypt.hash(password, 10);
+        
+        // Create user
+        const user = {
+            username: username.toLowerCase(),
+            email: email.toLowerCase(),
+            password: hashedPassword,
+            authType: 'local',
+            createdAt: new Date(),
+            lastActive: new Date()
+        };
+        
+        const result = await db.collection('users').insertOne(user);
+        
+        // Generate JWT
+        const token = jwt.sign({ userId: result.insertedId, username: user.username, authType: 'local' }, JWT_SECRET, { expiresIn: '7d' });
+        
+        res.json({ 
+            success: true, 
+            token, 
+            user: { id: result.insertedId, username: user.username, email: user.email }
+        });
+        
+    } catch (error) {
+        console.error('Registration error:', error);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
+});
+
+// Login user
+app.post('/api/auth/login', async (req, res) => {
+    try {
+        const { username, password } = req.body;
+        
+        if (!username || !password) {
+            return res.status(400).json({ success: false, message: 'Username and password required' });
+        }
+        
+        const user = await db.collection('users').findOne({ username: username.toLowerCase() });
+        
+        if (!user) {
+            return res.status(401).json({ success: false, message: 'Invalid credentials' });
+        }
+        
+        const validPassword = await bcrypt.compare(password, user.password);
+        
+        if (!validPassword) {
+            return res.status(401).json({ success: false, message: 'Invalid credentials' });
+        }
+        
+        // Update last active
+        await db.collection('users').updateOne(
+            { _id: user._id },
+            { $set: { lastActive: new Date() } }
+        );
+        
+        const token = jwt.sign({ userId: user._id, username: user.username, authType: 'local' }, JWT_SECRET, { expiresIn: '7d' });
+        
+        res.json({ 
+            success: true, 
+            token, 
+            user: { id: user._id, username: user.username, email: user.email }
+        });
+        
+    } catch (error) {
+        console.error('Login error:', error);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
+});
+
+// Google Login
+app.post('/api/auth/google', async (req, res) => {
+    try {
+        const { tokenId } = req.body;
+        
+        if (!GOOGLE_CLIENT_ID) {
+            return res.status(500).json({ success: false, message: 'Google login not configured' });
+        }
+        
+        const ticket = await googleClient.verifyIdToken({
+            idToken: tokenId,
+            audience: GOOGLE_CLIENT_ID
+        });
+        
+        const payload = ticket.getPayload();
+        const { email, name, sub: googleId, picture } = payload;
+        
+        // Check if user exists
+        let user = await db.collection('users').findOne({ 
+            $or: [{ email: email.toLowerCase() }, { googleId: googleId }]
+        });
+        
+        if (!user) {
+            // Create new user
+            const newUser = {
+                username: name.toLowerCase().replace(/\s/g, '') + Math.floor(Math.random() * 1000),
+                email: email.toLowerCase(),
+                googleId: googleId,
+                avatar: picture,
+                authType: 'google',
+                createdAt: new Date(),
+                lastActive: new Date()
+            };
+            
+            const result = await db.collection('users').insertOne(newUser);
+            user = { ...newUser, _id: result.insertedId };
+        } else {
+            await db.collection('users').updateOne(
+                { _id: user._id },
+                { $set: { lastActive: new Date() } }
+            );
+        }
+        
+        const token = jwt.sign({ userId: user._id, username: user.username, authType: 'google' }, JWT_SECRET, { expiresIn: '7d' });
+        
+        res.json({ 
+            success: true, 
+            token, 
+            user: { id: user._id, username: user.username, email: user.email, avatar: user.avatar }
+        });
+        
+    } catch (error) {
+        console.error('Google login error:', error);
+        res.status(500).json({ success: false, message: 'Google login failed' });
+    }
+});
+
+// Verify token and get user
+app.get('/api/auth/verify', async (req, res) => {
+    try {
+        const token = req.headers.authorization?.split(' ')[1];
+        
+        if (!token) {
+            return res.status(401).json({ success: false, message: 'No token provided' });
+        }
+        
+        const decoded = jwt.verify(token, JWT_SECRET);
+        const user = await db.collection('users').findOne({ _id: new ObjectId(decoded.userId) });
+        
+        if (!user) {
+            return res.status(401).json({ success: false, message: 'User not found' });
+        }
+        
+        res.json({ 
+            success: true, 
+            user: { id: user._id, username: user.username, email: user.email, authType: user.authType }
+        });
+        
+    } catch (error) {
+        res.status(401).json({ success: false, message: 'Invalid token' });
+    }
+});
+
+// ============================================================
+// POINTS API (with custom user support)
+// ============================================================
+
+// Get user points from BotRix (for custom users, return custom points)
 app.get('/api/user/:viewer', async (req, res) => {
     try {
         const { viewer } = req.params;
         const platform = req.query.platform || 'twitch';
-        console.log(`📡 API call for user: ${viewer} on platform: ${platform}`);
+        const authToken = req.headers.authorization?.split(' ')[1];
+        
+        // Check if this is a custom user (not Twitch)
+        let customUser = null;
+        if (authToken) {
+            try {
+                const decoded = jwt.verify(authToken, JWT_SECRET);
+                customUser = await db.collection('users').findOne({ _id: new ObjectId(decoded.userId) });
+            } catch (e) {}
+        }
+        
+        // If custom user, return their stored points
+        if (customUser && customUser.username.toLowerCase() === viewer.toLowerCase() && customUser.authType !== 'twitch') {
+            const customPoints = customUser.points || 0;
+            return res.json({ 
+                success: true, 
+                points: customPoints,
+                stats: { level: 0, watchtime: 0, xp: 0, followage: 0 },
+                isCustomUser: true
+            });
+        }
+        
+        // Otherwise fetch from BotRix
         const result = await getBotRixUserStatsByUsername(viewer, platform);
         if (result.success) {
             res.json({ 
@@ -150,18 +360,66 @@ app.get('/api/user/:viewer', async (req, res) => {
     }
 });
 
-// Place a bet - with platform parameter
+// Place a bet
 app.post('/api/place-bet', async (req, res) => {
     try {
-        const { userId, viewerName, betAmount, twitchId, platform } = req.body;
+        const { userId, viewerName, betAmount, twitchId, platform, authToken } = req.body;
         
-        const twitchUserId = twitchId || userId;
         const platformValue = platform || 'twitch';
+        let userPoints = 0;
         
+        // Check if this is a custom user
+        let customUser = null;
+        if (authToken) {
+            try {
+                const decoded = jwt.verify(authToken, JWT_SECRET);
+                customUser = await db.collection('users').findOne({ _id: new ObjectId(decoded.userId) });
+            } catch (e) {}
+        }
+        
+        if (customUser && customUser.username.toLowerCase() === viewerName.toLowerCase() && customUser.authType !== 'twitch') {
+            userPoints = customUser.points || 0;
+            
+            if (userPoints < betAmount) {
+                return res.json({ 
+                    success: false, 
+                    message: `Insufficient points! You have ${userPoints}, need ${betAmount}.` 
+                });
+            }
+            
+            // Deduct points from custom user
+            await db.collection('users').updateOne(
+                { _id: customUser._id },
+                { $set: { points: userPoints - betAmount, lastActive: new Date() } }
+            );
+            
+            // Record bet
+            const betEntry = {
+                userId: customUser._id.toString(),
+                viewerName: viewerName.toLowerCase(),
+                betAmount: betAmount,
+                platform: platformValue,
+                status: 'pending',
+                isCustomUser: true,
+                createdAt: new Date()
+            };
+            
+            const result = await db.collection('bets').insertOne(betEntry);
+            
+            return res.json({ 
+                success: true, 
+                message: `Bet placed! ${betAmount} points deducted. Waiting for result.`,
+                newPoints: userPoints - betAmount,
+                betId: result.insertedId
+            });
+        }
+        
+        // Check if user already has a pending bet
         const existingBet = await db.collection('bets').findOne({ 
             viewerName: viewerName.toLowerCase(), 
             status: 'pending',
-            platform: platformValue
+            platform: platformValue,
+            isCustomUser: { $ne: true }
         });
         
         if (existingBet) {
@@ -180,18 +438,18 @@ app.post('/api/place-bet', async (req, res) => {
             });
         }
         
-        const spendResult = await spendBotRixPoints(twitchUserId, betAmount, platformValue, `Wheel Bet: ${betAmount} points`);
+        const spendResult = await spendBotRixPoints(viewerName, betAmount, platformValue, `Wheel Bet: ${betAmount} points`);
         if (!spendResult.success) {
             return res.json({ success: false, message: 'Failed to deduct points. Please try again.' });
         }
         
         const betEntry = {
             userId: userId,
-            twitchId: twitchUserId,
             viewerName: viewerName.toLowerCase(),
             betAmount: betAmount,
             platform: platformValue,
             status: 'pending',
+            isCustomUser: false,
             createdAt: new Date()
         };
         
@@ -212,7 +470,7 @@ app.post('/api/place-bet', async (req, res) => {
     }
 });
 
-// Get all pending bets (for admin)
+// Get all pending bets
 app.get('/api/pending-bets', async (req, res) => {
     try {
         const bets = await db.collection('bets')
@@ -242,17 +500,35 @@ app.post('/api/resolve-all-win', async (req, res) => {
             const winAmount = bet.betAmount * 24;
             const platformValue = bet.platform || 'twitch';
             
-            const addResult = await addBotRixPoints(bet.twitchId, winAmount, platformValue, `Wheel Bet WIN - ${winAmount} points`);
-            
-            if (addResult.success) {
-                await db.collection('bets').updateOne(
-                    { _id: bet._id },
-                    { $set: { status: 'win', winAmount: winAmount, resolvedAt: new Date() } }
-                );
-                successCount++;
-                results.push({ viewer: bet.viewerName, platform: platformValue, status: 'win', amount: winAmount });
+            if (bet.isCustomUser) {
+                // Handle custom user win
+                const customUser = await db.collection('users').findOne({ _id: new ObjectId(bet.userId) });
+                if (customUser) {
+                    const newPoints = (customUser.points || 0) + winAmount;
+                    await db.collection('users').updateOne(
+                        { _id: customUser._id },
+                        { $set: { points: newPoints } }
+                    );
+                    await db.collection('bets').updateOne(
+                        { _id: bet._id },
+                        { $set: { status: 'win', winAmount: winAmount, resolvedAt: new Date() } }
+                    );
+                    successCount++;
+                    results.push({ viewer: bet.viewerName, platform: platformValue, status: 'win', amount: winAmount });
+                }
             } else {
-                results.push({ viewer: bet.viewerName, platform: platformValue, status: 'failed', error: 'API error' });
+                const addResult = await addBotRixPoints(bet.viewerName, winAmount, platformValue, `Wheel Bet WIN - ${winAmount} points`);
+                
+                if (addResult.success) {
+                    await db.collection('bets').updateOne(
+                        { _id: bet._id },
+                        { $set: { status: 'win', winAmount: winAmount, resolvedAt: new Date() } }
+                    );
+                    successCount++;
+                    results.push({ viewer: bet.viewerName, platform: platformValue, status: 'win', amount: winAmount });
+                } else {
+                    results.push({ viewer: bet.viewerName, platform: platformValue, status: 'failed', error: 'API error' });
+                }
             }
         }
         
