@@ -19,8 +19,8 @@ const JWT_SECRET = process.env.JWT_SECRET || "lmao-jwt-key-bhOpp!n5791!$;-this-t
 
 // 🔑 YOUR TWITCH NUMERIC ID – REPLACE WITH YOUR ACTUAL ID
 // You can find it by logging in with Twitch and looking at the console output.
-const STREAMER_TWITCH_ID = "1466503227";               // <-- CHANGE THIS TO YOUR TWITCH NUMERIC ID
-
+const STREAMER_TWITCH_ID = "1465573595";               // <-- CHANGE THIS TO YOUR TWITCH NUMERIC ID
+                            
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
 
