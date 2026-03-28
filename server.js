@@ -14,8 +14,8 @@ const PORT = process.env.PORT || 3000;
 const BOTRIX_API_BASE = "https://botrix.live/api";
 const BOTRIX_BID = "fgMhJa9%2F7J06PwfKOA7Ayg";
 const STREAMER_NAME = "YosukeTV";
-const ADMIN_SECRET = "YosukeAdmin2024";
-const JWT_SECRET = process.env.JWT_SECRET || "your-super-secret-jwt-key-change-this";
+const ADMIN_SECRET = "#bhOpp!n5791!$;";
+const JWT_SECRET = process.env.JWT_SECRET || "lmao-jwt-key-bhOpp!n5791!$;-this-to-something-lmao";
 
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
