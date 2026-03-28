@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const BOTRIX_API_BASE = "https://botrix.live/api";
 const BOTRIX_BID = "fgMhJa9%2F7J06PwfKOA7Ayg";
 const STREAMER_NAME = "YosukeTV";
-const ADMIN_SECRET = "#bhOpp!n5791!$;";
+const ADMIN_SECRET = "#bhOpp!n5791!$;";          // Change this to your own secret
 const JWT_SECRET = process.env.JWT_SECRET || "lmao-jwt-key-bhOpp!n5791!$;-this-to-something-lmao";
 
 app.use(cors({ origin: true, credentials: true }));
@@ -138,9 +138,9 @@ app.post('/api/auth/register', async (req, res) => {
         const hashedPassword = await bcrypt.hash(password, 10);
         const newUser = { username: username.toLowerCase(), displayName: username, email: email || '', password: hashedPassword, createdAt: new Date(), type: 'custom' };
         const result = await db.collection('users').insertOne(newUser);
-        const isAdmin = await isUserAdmin(username.toLowerCase());
+        // New users are never admin
         const token = jwt.sign({ userId: result.insertedId, username: username.toLowerCase(), type: 'custom' }, JWT_SECRET, { expiresIn: '7d' });
-        res.json({ success: true, token, user: { id: result.insertedId, username: username.toLowerCase(), displayName: username, type: 'custom', isAdmin } });
+        res.json({ success: true, token, user: { id: result.insertedId, username: username.toLowerCase(), displayName: username, type: 'custom', isAdmin: false } });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
@@ -193,6 +193,16 @@ app.post('/api/auth/admin-verify', async (req, res) => {
             return res.json({ success: true, isAdmin: true, message: 'Admin privileges granted!' });
         }
         res.json({ success: false, isAdmin: false, message: 'Invalid admin code' });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.post('/api/auth/check-admin', async (req, res) => {
+    try {
+        const { username, twitchId } = req.body;
+        const isAdmin = await isUserAdmin(username, twitchId);
+        res.json({ success: true, isAdmin });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
