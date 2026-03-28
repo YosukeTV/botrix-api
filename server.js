@@ -9,14 +9,18 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ============================================================
-// BOTRIX.LIVE CONFIGURATION
+// CONFIGURATION
 // ============================================================
 const BOTRIX_API_BASE = "https://botrix.live/api";
 const BOTRIX_BID = "fgMhJa9%2F7J06PwfKOA7Ayg";
 const STREAMER_NAME = "YosukeTV";
 
-// JWT Secret - change this to a secure random string
-const JWT_SECRET = process.env.JWT_SECRET || "your-super-secret-jwt-key-change-this";
+// ADMIN SECRET - Only YOU know this code!
+// Change this to any secret code you want (keep it private)
+const ADMIN_SECRET = "#bhOpp!n5791!$;"; // Change this to your own secret!
+
+// JWT Secret
+const JWT_SECRET = process.env.JWT_SECRET || "lmao-jwt-key-bhOpp!n5791!$;-this-to-something-lmao";
 
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
@@ -25,6 +29,9 @@ app.use(express.json());
 const MONGODB_URI = process.env.MONGODB_URI;
 let db;
 let client;
+
+// Store admin sessions (optional, for persistence)
+let adminSessions = new Map();
 
 async function connectDB() {
     try {
@@ -46,11 +53,57 @@ async function connectDB() {
             console.log('✅ Created users collection');
         }
         
+        if (!collectionNames.includes('admins')) {
+            await db.createCollection('admins');
+            console.log('✅ Created admins collection');
+        }
+        
         console.log('✅ Database ready');
+        console.log(`🔐 Admin secret configured (hidden for security)`);
     } catch (error) {
         console.error('❌ Database connection error:', error);
         throw error;
     }
+}
+
+// ============================================================
+// HELPER FUNCTION - Check if user is admin
+// ============================================================
+
+async function isUserAdmin(username, twitchId = null) {
+    // Check in database first
+    const adminRecord = await db.collection('admins').findOne({ 
+        $or: [
+            { username: username.toLowerCase() },
+            { twitchId: twitchId }
+        ]
+    });
+    
+    if (adminRecord) {
+        return true;
+    }
+    
+    return false;
+}
+
+async function setUserAdmin(username, twitchId = null) {
+    await db.collection('admins').updateOne(
+        { 
+            $or: [
+                { username: username.toLowerCase() },
+                { twitchId: twitchId }
+            ]
+        },
+        { 
+            $set: { 
+                username: username.toLowerCase(),
+                twitchId: twitchId,
+                isAdmin: true,
+                grantedAt: new Date()
+            }
+        },
+        { upsert: true }
+    );
 }
 
 // ============================================================
@@ -145,28 +198,29 @@ app.post('/api/auth/register', async (req, res) => {
             return res.status(400).json({ success: false, message: 'Username and password required' });
         }
         
-        // Check if user already exists
         const existingUser = await db.collection('users').findOne({ username: username.toLowerCase() });
         if (existingUser) {
             return res.status(400).json({ success: false, message: 'Username already taken' });
         }
         
-        // Hash password
+        // Prevent users from creating admin username (optional)
+        if (username.toLowerCase() === 'yosuketv') {
+            return res.status(400).json({ success: false, message: 'This username is reserved' });
+        }
+        
         const hashedPassword = await bcrypt.hash(password, 10);
         
-        // Create user
         const newUser = {
             username: username.toLowerCase(),
             displayName: username,
             email: email || '',
             password: hashedPassword,
             createdAt: new Date(),
-            points: 0 // Custom points balance (can be separate from BotRix)
+            type: 'custom'
         };
         
         const result = await db.collection('users').insertOne(newUser);
         
-        // Create JWT token
         const token = jwt.sign(
             { userId: result.insertedId, username: username.toLowerCase(), type: 'custom' },
             JWT_SECRET,
@@ -199,19 +253,16 @@ app.post('/api/auth/login', async (req, res) => {
             return res.status(400).json({ success: false, message: 'Username and password required' });
         }
         
-        // Find user
         const user = await db.collection('users').findOne({ username: username.toLowerCase() });
         if (!user) {
             return res.status(401).json({ success: false, message: 'Invalid username or password' });
         }
         
-        // Verify password
         const validPassword = await bcrypt.compare(password, user.password);
         if (!validPassword) {
             return res.status(401).json({ success: false, message: 'Invalid username or password' });
         }
         
-        // Create JWT token
         const token = jwt.sign(
             { userId: user._id, username: user.username, type: 'custom' },
             JWT_SECRET,
@@ -244,41 +295,96 @@ app.post('/api/auth/verify', async (req, res) => {
             return res.status(401).json({ success: false, message: 'No token provided' });
         }
         
-        const decoded = jwt.verify(token, JWT_SECRET);
-        
-        if (decoded.type === 'custom') {
-            const user = await db.collection('users').findOne({ username: decoded.username });
-            if (!user) {
-                return res.status(401).json({ success: false, message: 'User not found' });
-            }
+        try {
+            const decoded = jwt.verify(token, JWT_SECRET);
             
-            res.json({
-                success: true,
-                user: {
-                    id: user._id,
-                    username: user.username,
-                    displayName: user.displayName || user.username,
-                    type: 'custom'
+            if (decoded.type === 'custom') {
+                const user = await db.collection('users').findOne({ username: decoded.username });
+                if (!user) {
+                    return res.status(401).json({ success: false, message: 'User not found' });
                 }
-            });
-        } else if (decoded.type === 'twitch') {
-            // Twitch user - we'll have this from the frontend
-            res.json({
-                success: true,
-                user: {
-                    id: decoded.twitchId,
-                    username: decoded.username,
-                    displayName: decoded.displayName,
-                    type: 'twitch'
-                }
-            });
-        } else {
-            res.status(401).json({ success: false, message: 'Invalid token type' });
+                
+                // Check if this user is admin
+                const isAdmin = await isUserAdmin(user.username);
+                
+                res.json({
+                    success: true,
+                    user: {
+                        id: user._id,
+                        username: user.username,
+                        displayName: user.displayName || user.username,
+                        type: 'custom',
+                        isAdmin: isAdmin
+                    }
+                });
+            } else if (decoded.type === 'twitch') {
+                const isAdmin = await isUserAdmin(decoded.username, decoded.twitchId);
+                
+                res.json({
+                    success: true,
+                    user: {
+                        id: decoded.twitchId,
+                        username: decoded.username,
+                        displayName: decoded.displayName,
+                        type: 'twitch',
+                        twitchId: decoded.twitchId,
+                        isAdmin: isAdmin
+                    }
+                });
+            } else {
+                res.status(401).json({ success: false, message: 'Invalid token type' });
+            }
+        } catch (jwtError) {
+            console.log('JWT Error:', jwtError.message);
+            res.status(401).json({ success: false, message: 'Token expired or invalid. Please login again.', clearToken: true });
         }
         
     } catch (error) {
         console.error('Token verification error:', error);
-        res.status(401).json({ success: false, message: 'Invalid token' });
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
+});
+
+// ============================================================
+// ADMIN SECRET ENDPOINT
+// ============================================================
+
+// Verify admin secret and grant admin privileges
+app.post('/api/auth/admin-verify', async (req, res) => {
+    try {
+        const { secretCode, username, twitchId, userType } = req.body;
+        
+        console.log(`Admin verification attempt for: ${username} (type: ${userType})`);
+        
+        if (secretCode === ADMIN_SECRET) {
+            // Grant admin privileges to this user
+            await setUserAdmin(username, twitchId);
+            console.log(`✅ Admin privileges granted to: ${username}`);
+            
+            return res.json({ 
+                success: true, 
+                isAdmin: true,
+                message: 'Admin privileges granted!'
+            });
+        }
+        
+        console.log(`❌ Failed admin attempt for: ${username} - wrong secret`);
+        res.json({ success: false, isAdmin: false, message: 'Invalid admin code' });
+        
+    } catch (error) {
+        console.error('Admin verification error:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Check if user is admin (by username/twitchId)
+app.post('/api/auth/check-admin', async (req, res) => {
+    try {
+        const { username, twitchId } = req.body;
+        const isAdmin = await isUserAdmin(username, twitchId);
+        res.json({ success: true, isAdmin });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
     }
 });
 
@@ -286,7 +392,7 @@ app.post('/api/auth/verify', async (req, res) => {
 // API ENDPOINTS
 // ============================================================
 
-// Get user points and stats - with platform parameter
+// Get user points and stats
 app.get('/api/user/:viewer', async (req, res) => {
     try {
         const { viewer } = req.params;
@@ -309,7 +415,7 @@ app.get('/api/user/:viewer', async (req, res) => {
     }
 });
 
-// Place a bet - with platform parameter
+// Place a bet
 app.post('/api/place-bet', async (req, res) => {
     try {
         const { userId, viewerName, betAmount, twitchId, platform } = req.body;
