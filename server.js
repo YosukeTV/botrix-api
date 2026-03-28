@@ -16,11 +16,11 @@ const BOTRIX_BID = "fgMhJa9%2F7J06PwfKOA7Ayg";
 const STREAMER_NAME = "YosukeTV";
 
 // ADMIN SECRET - Only YOU know this code!
-// Change this to any secret code you want (keep it private)
-const ADMIN_SECRET = "#bhOpp!n5791!$;"; // Change this to your own secret!
+// Change this to your own secret code
+const ADMIN_SECRET = "YosukeAdmin2024";
 
-// JWT Secret
-const JWT_SECRET = process.env.JWT_SECRET || "lmao-jwt-key-bhOpp!n5791!$;-this-to-something-lmao";
+// JWT Secret - Use environment variable in production
+const JWT_SECRET = process.env.JWT_SECRET || "your-super-secret-jwt-key-change-this-in-production";
 
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
@@ -29,9 +29,6 @@ app.use(express.json());
 const MONGODB_URI = process.env.MONGODB_URI;
 let db;
 let client;
-
-// Store admin sessions (optional, for persistence)
-let adminSessions = new Map();
 
 async function connectDB() {
     try {
@@ -59,7 +56,7 @@ async function connectDB() {
         }
         
         console.log('✅ Database ready');
-        console.log(`🔐 Admin secret configured (hidden for security)`);
+        console.log(`🔐 Admin secret configured`);
     } catch (error) {
         console.error('❌ Database connection error:', error);
         throw error;
@@ -67,36 +64,32 @@ async function connectDB() {
 }
 
 // ============================================================
-// HELPER FUNCTION - Check if user is admin
+// HELPER FUNCTIONS
 // ============================================================
 
+// Check if user is admin
 async function isUserAdmin(username, twitchId = null) {
-    // Check in database first
     const adminRecord = await db.collection('admins').findOne({ 
         $or: [
-            { username: username.toLowerCase() },
+            { username: username?.toLowerCase() },
             { twitchId: twitchId }
         ]
     });
-    
-    if (adminRecord) {
-        return true;
-    }
-    
-    return false;
+    return !!adminRecord;
 }
 
+// Grant admin privileges to user
 async function setUserAdmin(username, twitchId = null) {
     await db.collection('admins').updateOne(
         { 
             $or: [
-                { username: username.toLowerCase() },
+                { username: username?.toLowerCase() },
                 { twitchId: twitchId }
             ]
         },
         { 
             $set: { 
-                username: username.toLowerCase(),
+                username: username?.toLowerCase(),
                 twitchId: twitchId,
                 isAdmin: true,
                 grantedAt: new Date()
@@ -189,7 +182,7 @@ async function addBotRixPoints(twitchUserId, amount, platform, reason) {
 // CUSTOM AUTH ENDPOINTS
 // ============================================================
 
-// Register a new user
+// Register a new user (Custom account)
 app.post('/api/auth/register', async (req, res) => {
     try {
         const { username, password, email } = req.body;
@@ -198,12 +191,13 @@ app.post('/api/auth/register', async (req, res) => {
             return res.status(400).json({ success: false, message: 'Username and password required' });
         }
         
+        // Check if user already exists in custom users collection
         const existingUser = await db.collection('users').findOne({ username: username.toLowerCase() });
         if (existingUser) {
             return res.status(400).json({ success: false, message: 'Username already taken' });
         }
         
-        // Prevent users from creating admin username (optional)
+        // Prevent users from creating admin username
         if (username.toLowerCase() === 'yosuketv') {
             return res.status(400).json({ success: false, message: 'This username is reserved' });
         }
@@ -221,8 +215,11 @@ app.post('/api/auth/register', async (req, res) => {
         
         const result = await db.collection('users').insertOne(newUser);
         
+        // Check if this user is admin (for the streamer's custom account)
+        const isAdmin = await isUserAdmin(username.toLowerCase());
+        
         const token = jwt.sign(
-            { userId: result.insertedId, username: username.toLowerCase(), type: 'custom' },
+            { userId: result.insertedId, username: username.toLowerCase(), type: 'custom', isAdmin: isAdmin },
             JWT_SECRET,
             { expiresIn: '7d' }
         );
@@ -234,7 +231,8 @@ app.post('/api/auth/register', async (req, res) => {
                 id: result.insertedId,
                 username: username.toLowerCase(),
                 displayName: username,
-                type: 'custom'
+                type: 'custom',
+                isAdmin: isAdmin
             }
         });
         
@@ -244,7 +242,7 @@ app.post('/api/auth/register', async (req, res) => {
     }
 });
 
-// Login with username/password
+// Login with username/password (Custom account)
 app.post('/api/auth/login', async (req, res) => {
     try {
         const { username, password } = req.body;
@@ -263,8 +261,10 @@ app.post('/api/auth/login', async (req, res) => {
             return res.status(401).json({ success: false, message: 'Invalid username or password' });
         }
         
+        const isAdmin = await isUserAdmin(user.username);
+        
         const token = jwt.sign(
-            { userId: user._id, username: user.username, type: 'custom' },
+            { userId: user._id, username: user.username, type: 'custom', isAdmin: isAdmin },
             JWT_SECRET,
             { expiresIn: '7d' }
         );
@@ -276,7 +276,8 @@ app.post('/api/auth/login', async (req, res) => {
                 id: user._id,
                 username: user.username,
                 displayName: user.displayName || user.username,
-                type: 'custom'
+                type: 'custom',
+                isAdmin: isAdmin
             }
         });
         
@@ -301,10 +302,9 @@ app.post('/api/auth/verify', async (req, res) => {
             if (decoded.type === 'custom') {
                 const user = await db.collection('users').findOne({ username: decoded.username });
                 if (!user) {
-                    return res.status(401).json({ success: false, message: 'User not found' });
+                    return res.status(401).json({ success: false, message: 'User not found', clearToken: true });
                 }
                 
-                // Check if this user is admin
                 const isAdmin = await isUserAdmin(user.username);
                 
                 res.json({
@@ -332,11 +332,15 @@ app.post('/api/auth/verify', async (req, res) => {
                     }
                 });
             } else {
-                res.status(401).json({ success: false, message: 'Invalid token type' });
+                res.status(401).json({ success: false, message: 'Invalid token type', clearToken: true });
             }
         } catch (jwtError) {
             console.log('JWT Error:', jwtError.message);
-            res.status(401).json({ success: false, message: 'Token expired or invalid. Please login again.', clearToken: true });
+            res.status(401).json({ 
+                success: false, 
+                message: 'Session expired. Please login again.', 
+                clearToken: true 
+            });
         }
         
     } catch (error) {
@@ -377,7 +381,7 @@ app.post('/api/auth/admin-verify', async (req, res) => {
     }
 });
 
-// Check if user is admin (by username/twitchId)
+// Check if user is admin
 app.post('/api/auth/check-admin', async (req, res) => {
     try {
         const { username, twitchId } = req.body;
