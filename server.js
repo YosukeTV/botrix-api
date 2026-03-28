@@ -11,7 +11,6 @@ const PORT = process.env.PORT || 3000;
 // ============================================================
 const BOTRIX_API_BASE = "https://botrix.live/api";
 const BOTRIX_BID = "fgMhJa9%2F7J06PwfKOA7Ayg";
-const BOTRIX_PLATFORM = "twitch";
 const STREAMER_NAME = "YosukeTV";
 
 app.use(cors({ origin: true, credentials: true }));
@@ -45,13 +44,14 @@ async function connectDB() {
 }
 
 // ============================================================
-// BOTRIX PUBLIC API - GET USER STATS (NO CACHING)
+// BOTRIX PUBLIC API - GET USER STATS (with platform parameter)
 // ============================================================
 
-async function getBotRixUserStatsByUsername(viewerName) {
+async function getBotRixUserStatsByUsername(viewerName, platform) {
     try {
-        // Add timestamp to prevent any caching
-        const url = `${BOTRIX_API_BASE}/public/leaderboard?platform=${BOTRIX_PLATFORM}&user=${encodeURIComponent(STREAMER_NAME)}&search=${encodeURIComponent(viewerName)}&_=${Date.now()}`;
+        // Use the platform parameter from the request
+        const platformValue = platform || 'twitch';
+        const url = `${BOTRIX_API_BASE}/public/leaderboard?platform=${platformValue}&user=${encodeURIComponent(STREAMER_NAME)}&search=${encodeURIComponent(viewerName)}&_=${Date.now()}`;
         console.log(`🔄 Fetching fresh stats from: ${url}`);
         
         const response = await fetch(url, {
@@ -65,7 +65,7 @@ async function getBotRixUserStatsByUsername(viewerName) {
         
         if (Array.isArray(data) && data.length > 0) {
             const userData = data[0];
-            console.log(`✅ Found ${viewerName}: ${userData.points} points`);
+            console.log(`✅ Found ${viewerName} on ${platformValue}: ${userData.points} points`);
             return { 
                 success: true, 
                 points: userData.points || 0,
@@ -73,11 +73,12 @@ async function getBotRixUserStatsByUsername(viewerName) {
                 watchtime: userData.watchtime || 0,
                 xp: userData.xp || 0,
                 name: userData.name,
-                followage: userData.followage || 0
+                followage: userData.followage || 0,
+                platform: platformValue
             };
         }
-        console.log(`⚠️ User ${viewerName} not found, returning 0 points`);
-        return { success: true, points: 0, level: 0, watchtime: 0, xp: 0, name: viewerName, followage: 0 };
+        console.log(`⚠️ User ${viewerName} not found on ${platformValue}, returning 0 points`);
+        return { success: true, points: 0, level: 0, watchtime: 0, xp: 0, name: viewerName, followage: 0, platform: platformValue };
     } catch (error) {
         console.error('Error fetching user stats:', error);
         return { success: false, error: error.message };
@@ -85,13 +86,14 @@ async function getBotRixUserStatsByUsername(viewerName) {
 }
 
 // ============================================================
-// BOTRIX PRIVATE API - SPEND / ADD POINTS
+// BOTRIX PRIVATE API - SPEND / ADD POINTS (works for both platforms)
 // ============================================================
 
-async function spendBotRixPoints(twitchUserId, amount, reason) {
+async function spendBotRixPoints(twitchUserId, amount, platform, reason) {
     try {
-        const url = `${BOTRIX_API_BASE}/extension/substractPoints?uid=${encodeURIComponent(twitchUserId)}&platform=${BOTRIX_PLATFORM}&points=${amount}&bid=${BOTRIX_BID}&_=${Date.now()}`;
-        console.log(`🔴 Spending ${amount} points for user ID: ${twitchUserId}`);
+        const platformValue = platform || 'twitch';
+        const url = `${BOTRIX_API_BASE}/extension/substractPoints?uid=${encodeURIComponent(twitchUserId)}&platform=${platformValue}&points=${amount}&bid=${BOTRIX_BID}&_=${Date.now()}`;
+        console.log(`🔴 Spending ${amount} points for user ID: ${twitchUserId} on ${platformValue}`);
         
         const response = await fetch(url);
         const data = await response.json();
@@ -104,10 +106,11 @@ async function spendBotRixPoints(twitchUserId, amount, reason) {
     }
 }
 
-async function addBotRixPoints(twitchUserId, amount, reason) {
+async function addBotRixPoints(twitchUserId, amount, platform, reason) {
     try {
-        const url = `${BOTRIX_API_BASE}/extension/substractPoints?uid=${encodeURIComponent(twitchUserId)}&platform=${BOTRIX_PLATFORM}&points=${-amount}&bid=${BOTRIX_BID}&_=${Date.now()}`;
-        console.log(`🟢 Adding ${amount} points to user ID: ${twitchUserId}`);
+        const platformValue = platform || 'twitch';
+        const url = `${BOTRIX_API_BASE}/extension/substractPoints?uid=${encodeURIComponent(twitchUserId)}&platform=${platformValue}&points=${-amount}&bid=${BOTRIX_BID}&_=${Date.now()}`;
+        console.log(`🟢 Adding ${amount} points to user ID: ${twitchUserId} on ${platformValue}`);
         
         const response = await fetch(url);
         const data = await response.json();
@@ -124,18 +127,19 @@ async function addBotRixPoints(twitchUserId, amount, reason) {
 // API ENDPOINTS
 // ============================================================
 
-// Get user points and stats - ALWAYS FRESH
+// Get user points and stats - with platform parameter
 app.get('/api/user/:viewer', async (req, res) => {
     try {
         const { viewer } = req.params;
-        console.log(`📡 API call for user: ${viewer}`);
-        const result = await getBotRixUserStatsByUsername(viewer);
+        const platform = req.query.platform || 'twitch';
+        console.log(`📡 API call for user: ${viewer} on platform: ${platform}`);
+        const result = await getBotRixUserStatsByUsername(viewer, platform);
         if (result.success) {
-            // Add timestamp to response to show it's fresh
             res.json({ 
                 success: true, 
                 points: result.points, 
                 stats: result,
+                platform: platform,
                 timestamp: Date.now()
             });
         } else {
@@ -146,23 +150,25 @@ app.get('/api/user/:viewer', async (req, res) => {
     }
 });
 
-// Place a bet (deduct points immediately)
+// Place a bet - with platform parameter
 app.post('/api/place-bet', async (req, res) => {
     try {
-        const { userId, viewerName, betAmount, twitchId } = req.body;
+        const { userId, viewerName, betAmount, twitchId, platform } = req.body;
         
         const twitchUserId = twitchId || userId;
+        const platformValue = platform || 'twitch';
         
         const existingBet = await db.collection('bets').findOne({ 
             viewerName: viewerName.toLowerCase(), 
-            status: 'pending' 
+            status: 'pending',
+            platform: platformValue
         });
         
         if (existingBet) {
             return res.json({ success: false, message: 'You already have a pending bet! Wait for resolution.' });
         }
         
-        const userStats = await getBotRixUserStatsByUsername(viewerName);
+        const userStats = await getBotRixUserStatsByUsername(viewerName, platformValue);
         if (!userStats.success) {
             return res.json({ success: false, message: 'Could not verify points' });
         }
@@ -174,7 +180,7 @@ app.post('/api/place-bet', async (req, res) => {
             });
         }
         
-        const spendResult = await spendBotRixPoints(twitchUserId, betAmount, `Wheel Bet: ${betAmount} points`);
+        const spendResult = await spendBotRixPoints(twitchUserId, betAmount, platformValue, `Wheel Bet: ${betAmount} points`);
         if (!spendResult.success) {
             return res.json({ success: false, message: 'Failed to deduct points. Please try again.' });
         }
@@ -184,14 +190,14 @@ app.post('/api/place-bet', async (req, res) => {
             twitchId: twitchUserId,
             viewerName: viewerName.toLowerCase(),
             betAmount: betAmount,
+            platform: platformValue,
             status: 'pending',
             createdAt: new Date()
         };
         
         const result = await db.collection('bets').insertOne(betEntry);
         
-        // Get fresh points after deduction
-        const freshStats = await getBotRixUserStatsByUsername(viewerName);
+        const freshStats = await getBotRixUserStatsByUsername(viewerName, platformValue);
         
         res.json({ 
             success: true, 
@@ -214,16 +220,7 @@ app.get('/api/pending-bets', async (req, res) => {
             .sort({ createdAt: -1 })
             .toArray();
         
-        // Get current points for each bettor (fresh)
-        const betsWithPoints = await Promise.all(bets.map(async (bet) => {
-            const stats = await getBotRixUserStatsByUsername(bet.viewerName);
-            return {
-                ...bet,
-                currentPoints: stats.success ? stats.points : 0
-            };
-        }));
-        
-        res.json({ success: true, bets: betsWithPoints });
+        res.json({ success: true, bets });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
@@ -243,8 +240,9 @@ app.post('/api/resolve-all-win', async (req, res) => {
         
         for (const bet of pendingBets) {
             const winAmount = bet.betAmount * 24;
+            const platformValue = bet.platform || 'twitch';
             
-            const addResult = await addBotRixPoints(bet.twitchId, winAmount, `Wheel Bet WIN - ${winAmount} points`);
+            const addResult = await addBotRixPoints(bet.twitchId, winAmount, platformValue, `Wheel Bet WIN - ${winAmount} points`);
             
             if (addResult.success) {
                 await db.collection('bets').updateOne(
@@ -252,9 +250,9 @@ app.post('/api/resolve-all-win', async (req, res) => {
                     { $set: { status: 'win', winAmount: winAmount, resolvedAt: new Date() } }
                 );
                 successCount++;
-                results.push({ viewer: bet.viewerName, status: 'win', amount: winAmount });
+                results.push({ viewer: bet.viewerName, platform: platformValue, status: 'win', amount: winAmount });
             } else {
-                results.push({ viewer: bet.viewerName, status: 'failed', error: 'API error' });
+                results.push({ viewer: bet.viewerName, platform: platformValue, status: 'failed', error: 'API error' });
             }
         }
         
@@ -305,23 +303,11 @@ app.get('/api/bets/:userId', async (req, res) => {
     }
 });
 
-// Debug endpoint to test fresh fetch
-app.get('/api/debug/fresh/:username', async (req, res) => {
-    try {
-        const { username } = req.params;
-        const result = await getBotRixUserStatsByUsername(username);
-        res.json(result);
-    } catch (error) {
-        res.json({ error: error.message });
-    }
-});
-
 // Health check
 app.get('/', (req, res) => {
     res.json({ 
         status: 'BotRix API is running!', 
         mongodb: db ? 'connected' : 'disconnected',
-        platform: BOTRIX_PLATFORM,
         streamer: STREAMER_NAME
     });
 });
@@ -330,9 +316,7 @@ app.get('/', (req, res) => {
 connectDB().then(() => {
     app.listen(PORT, () => {
         console.log(`🚀 Server running on port ${PORT}`);
-        console.log(`📍 Platform: ${BOTRIX_PLATFORM}`);
         console.log(`📍 Streamer: ${STREAMER_NAME}`);
-        console.log(`📍 No caching enabled - always fetching fresh data`);
     });
 }).catch(err => {
     console.error('Failed to start server:', err);
